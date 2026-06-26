@@ -49,23 +49,35 @@
         return location.pathname.match(/\/users\/(\d+)/)?.[1];
     }
 
-    async function fetchPublicBookmarks(userId, offset = 0) {
-        const r = await fetch(
+    async function fetchWithRetry(input, init, btn) {
+        let delay = 15000;
+        while (true) {
+            const r = await fetch(input, init);
+            if (r.status !== 429) return r;
+            btn.textContent = `限速中，${Math.round(delay / 1000)}s 后重试…`;
+            await new Promise(res => setTimeout(res, delay));
+            delay = Math.min(Math.round(delay * 1.5), 60000);
+        }
+    }
+
+    async function fetchPublicBookmarks(userId, offset = 0, btn) {
+        const r = await fetchWithRetry(
             `/ajax/user/${userId}/illusts/bookmarks?tag=&offset=${offset}&limit=100&rest=show&lang=zh`,
-            { credentials: 'same-origin' }
+            { credentials: 'same-origin' },
+            btn
         );
         const json = await r.json();
         if (json.error) throw new Error(json.message);
         return json.body;
     }
 
-    async function setPrivate(illustId, token) {
-        const r = await fetch('/ajax/illusts/bookmarks/add', {
+    async function setPrivate(illustId, token, btn) {
+        const r = await fetchWithRetry('/ajax/illusts/bookmarks/add', {
             method: 'POST',
             credentials: 'same-origin',
             headers: { 'Content-Type': 'application/json', 'x-csrf-token': token },
             body: JSON.stringify({ illust_id: String(illustId), restrict: 1, comment: '', tags: [] }),
-        });
+        }, btn);
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
     }
 
@@ -86,7 +98,7 @@
                 const r18Works = [];
                 let offset = 0, total = Infinity;
                 while (offset < total) {
-                    const data = await fetchPublicBookmarks(userId, offset);
+                    const data = await fetchPublicBookmarks(userId, offset, btn);
                     total = data.total;
                     const batch = (data.works ?? []).filter(w => w.bookmarkData && w.id && w.xRestrict > 0);
                     r18Works.push(...batch);
@@ -97,18 +109,18 @@
                 }
                 // 再批量转换
                 for (let i = 0; i < r18Works.length; i += 5) {
-                    await Promise.all(r18Works.slice(i, i + 5).map(w => setPrivate(w.id, token)));
+                    await Promise.all(r18Works.slice(i, i + 5).map(w => setPrivate(w.id, token, btn)));
                     done += Math.min(5, r18Works.length - i);
                     btn.textContent = `转换中… ${done}/${r18Works.length}`;
                 }
             } else {
                 // 全部模式：始终从 offset=0 取，列表随转换自然缩短
                 while (true) {
-                    const data = await fetchPublicBookmarks(userId, 0);
+                    const data = await fetchPublicBookmarks(userId, 0, btn);
                     const works = (data.works ?? []).filter(w => w.bookmarkData && w.id);
                     if (!works.length) break;
                     for (let i = 0; i < works.length; i += 5) {
-                        await Promise.all(works.slice(i, i + 5).map(w => setPrivate(w.id, token)));
+                        await Promise.all(works.slice(i, i + 5).map(w => setPrivate(w.id, token, btn)));
                         done += Math.min(5, works.length - i);
                         btn.textContent = `转换中… ${done}`;
                     }
