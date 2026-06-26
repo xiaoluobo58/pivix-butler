@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv 收藏转不公开
 // @namespace    https://www.pixiv.net/
-// @version      1.1.2
+// @version      1.2.0
 // @description  一键将收藏夹所有公开收藏转为不公开（支持仅转换R18内容）
 // @author       Misaka Milobo (By Claude Code)
 // @updateURL    https://raw.githubusercontent.com/xiaoluobo58/pivix-butler/main/pixiv-bookmark-to-private.user.js
@@ -17,8 +17,22 @@
     'use strict';
 
     let r18Only = GM_getValue('r18Only', false);
-    let batchDelay = GM_getValue('batchDelay', 400);
+    // 每个写入请求之间的基础间隔（ms）。兼容旧键 batchDelay。
+    let reqInterval = GM_getValue('reqInterval', GM_getValue('batchDelay', 800));
     let scanPages = GM_getValue('scanPages', 0); // 0 = 全部扫完再转换，N = 每次扫N页后转换
+
+    // 自适应调速器：写入完全串行，命中 429 后整体永久降速，持续成功后缓慢回落。
+    const pace = {
+        base: reqInterval,
+        current: reqInterval,
+        max: 15000,
+        bump() { this.current = Math.min(Math.round(this.current * 1.5), this.max); },
+        ok() { if (this.current > this.base) this.current = Math.max(this.base, Math.round(this.current * 0.95)); },
+        wait() {
+            const ms = Math.round(this.current * (0.8 + Math.random() * 0.4)); // ±20% 抖动
+            return new Promise(res => setTimeout(res, ms));
+        },
+    };
 
     function getToken() {
         // 1. window globals (older Pixiv)
@@ -54,16 +68,20 @@
     }
 
     async function fetchWithRetry(input, init, btn) {
-        let delay = 15000;
+        let delay = 5000;
         while (true) {
             const r = await fetch(input, init);
             if (r.status !== 429) return r;
-            let remaining = Math.round(delay / 1000);
+            // 命中 429：整体永久降速，并优先按服务器 Retry-After 等待。
+            pace.bump();
+            const ra = parseInt(r.headers.get('retry-after'));
+            const waitMs = (!isNaN(ra) && ra > 0) ? ra * 1000 : delay;
+            let remaining = Math.round(waitMs / 1000);
             btn.textContent = `429 限速中，${remaining}s 后重试…`;
             const tid = setInterval(() => {
                 btn.textContent = `429 限速中，${Math.max(0, --remaining)}s 后重试…`;
             }, 1000);
-            await new Promise(res => setTimeout(res, delay));
+            await new Promise(res => setTimeout(res, waitMs));
             clearInterval(tid);
             delay = Math.min(Math.round(delay * 1.5), 60000);
         }
@@ -100,6 +118,7 @@
 
         btn.disabled = true;
         let done = 0;
+        pace.current = pace.base; // 每次运行从用户配置的节奏起步
 
         try {
             if (r18Only) {
@@ -109,6 +128,7 @@
                     const r18Works = [];
                     const maxPages = scanPages || Infinity;
                     let pagesScanned = 0;
+                    let reachedEnd = false;
                     while (offset < total && pagesScanned < maxPages) {
                         const data = await fetchPublicBookmarks(userId, offset, btn);
                         total = data.total;
@@ -116,15 +136,21 @@
                         offset += 100;
                         pagesScanned++;
                         btn.textContent = `扫描中… ${Math.min(offset, total)}/${total}`;
-                        if ((data.works ?? []).length < 100) { offset = total; break; }
-                        if (pagesScanned < maxPages) await new Promise(r => setTimeout(r, batchDelay));
+                        if ((data.works ?? []).length < 100) { reachedEnd = true; break; }
+                        if (pagesScanned < maxPages) await pace.wait();
                     }
-                    // 转换本轮 R18 作品
-                    for (let i = 0; i < r18Works.length; i += 5) {
-                        await Promise.all(r18Works.slice(i, i + 5).map(w => setPrivate(w.id, token, btn)));
-                        done += Math.min(5, r18Works.length - i);
+                    // 转换本轮 R18 作品（串行）
+                    for (const w of r18Works) {
+                        await pace.wait();
+                        await setPrivate(w.id, token, btn);
+                        pace.ok();
+                        done++;
                         btn.textContent = `转换中… ${done}`;
                     }
+                    // 已扫到末尾则结束。否则：转换会使这些作品从公开列表消失，
+                    // 后续未扫描作品整体前移，故回退 offset 以避免跳过。
+                    if (reachedEnd) break;
+                    offset = Math.max(0, offset - r18Works.length);
                 }
             } else {
                 // 全部模式：始终从 offset=0 取，列表随转换自然缩短
@@ -132,12 +158,13 @@
                     const data = await fetchPublicBookmarks(userId, 0, btn);
                     const works = (data.works ?? []).filter(w => w.bookmarkData && w.id);
                     if (!works.length) break;
-                    for (let i = 0; i < works.length; i += 5) {
-                        await Promise.all(works.slice(i, i + 5).map(w => setPrivate(w.id, token, btn)));
-                        done += Math.min(5, works.length - i);
+                    for (const w of works) {
+                        await pace.wait();
+                        await setPrivate(w.id, token, btn);
+                        pace.ok();
+                        done++;
                         btn.textContent = `转换中… ${done}`;
                     }
-                    await new Promise(r => setTimeout(r, batchDelay));
                 }
             }
             btn.textContent = `✓ 完成，共 ${done} 个`;
@@ -181,12 +208,12 @@
                 () => { r18Only = !r18Only; GM_setValue('r18Only', r18Only); updateBtn(); registerMenu(); toast(`仅R18模式：${r18Only ? '已开启 🔞' : '已关闭 🔒'}`); }
             ),
             GM_registerMenuCommand(
-                `⚙️ 转换速率：${batchDelay}ms/批`,
+                `⚙️ 写入间隔：${reqInterval}ms/个`,
                 () => {
-                    const v = prompt('每批次间隔（毫秒），默认400', batchDelay);
+                    const v = prompt('每个写入请求的间隔（毫秒），默认800', reqInterval);
                     if (v === null) return;
                     const n = parseInt(v);
-                    if (!isNaN(n) && n >= 0) { batchDelay = n; GM_setValue('batchDelay', n); registerMenu(); toast(`转换间隔已设为 ${n}ms`); }
+                    if (!isNaN(n) && n >= 0) { reqInterval = n; pace.base = n; GM_setValue('reqInterval', n); registerMenu(); toast(`写入间隔已设为 ${n}ms`); }
                 }
             ),
             GM_registerMenuCommand(
