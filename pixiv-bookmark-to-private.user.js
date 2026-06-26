@@ -1,9 +1,11 @@
 // ==UserScript==
 // @name         Pixiv 收藏转不公开
 // @namespace    https://www.pixiv.net/
-// @version      1.1
+// @version      1.1.1
 // @description  一键将收藏夹所有公开收藏转为不公开（支持仅转换R18内容）
 // @author       Misaka Milobo (By Claude Code)
+// @updateURL    https://raw.githubusercontent.com/xiaoluobo58/pivix-butler/main/pixiv-bookmark-to-private.user.js
+// @downloadURL  https://raw.githubusercontent.com/xiaoluobo58/pivix-butler/main/pixiv-bookmark-to-private.user.js
 // @match        https://www.pixiv.net/users/*/bookmarks/artworks*
 // @grant        GM_registerMenuCommand
 // @grant        GM_unregisterMenuCommand
