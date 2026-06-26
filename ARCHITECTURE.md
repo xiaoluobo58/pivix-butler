@@ -28,13 +28,17 @@ https://www.pixiv.net/users/*/bookmarks/artworks*
 
 ## 2. 持久化配置
 
-脚本启动时从 `GM_getValue` 读取三项配置（均可在油猴菜单修改并即时保存）：
+脚本启动时从 `GM_getValue` 读取以下配置（均可在油猴菜单修改并即时保存）：
 
 | 变量 | 默认值 | 含义 |
 | --- | --- | --- |
 | `r18Only` | `false` | 是否仅转换 R18 作品（`xRestrict > 0`） |
-| `reqInterval` | `800` | 每个写入请求之间的基础间隔毫秒数（调速器起始值）。兼容旧键 `batchDelay` |
+| `convMode` | `'batch'` | 转换模式：`'batch'`=批量接口(推荐) / `'slow'`=慢速逐个(保底) |
+| `reqInterval` | `800` | **慢速模式**每个写入请求之间的基础间隔毫秒数（调速器起始值）。兼容旧键 `batchDelay` |
+| `batchInterval` | `2500` | **批量模式**每批之间的间隔毫秒数（过小可能 429） |
 | `scanPages` | `0` | 分页扫描模式：`0` = 全部扫完再转换；`N` = 每扫 N 页就转换一轮 |
+
+另有常量 `BATCH_SIZE = 48`（批量模式每批最多提交的收藏数，与官方页尺寸一致，固定不可配）。
 
 ---
 
@@ -63,27 +67,44 @@ https://www.pixiv.net/users/*/bookmarks/artworks*
   - 命中 429 先 `pace.bump()`；等待时间**优先读响应头 `Retry-After`**（秒），无则用退避值。
   - 退避初始 `5s`、×1.5、上限 `60s`，并在按钮上**倒计时显示**。
   - 非 429 直接返回。**会无限重试 429**，直到成功。
-- **`fetchPublicBookmarks(userId, offset, btn)`** —— 拉取公开收藏列表（`rest=show`），单页 `limit=100`，返回 `json.body`（含 `works[]` 与 `total`）。
-- **`setPrivate(illustId, token, btn)`** —— 调用 `/ajax/illusts/bookmarks/add`，以 `restrict: 1`（不公开）重新收藏该作品，从而把公开收藏改为不公开。
+- **`fetchPublicBookmarks(userId, offset, btn)`** —— 拉取公开收藏列表（`rest=show`），单页 `limit=100`，返回 `json.body`（含 `works[]` 与 `total`）。每个 work 含 `id`（作品 ID）、`bookmarkData.id`（**收藏 ID**）、`xRestrict`。
+- **`setPrivate(illustId, token, btn)`**（慢速模式）—— 调用 `/ajax/illusts/bookmarks/add`，用**作品 ID** 以 `restrict: 1` 重新收藏，一次一个。
+- **`setPrivateBatch(bookmarkIds, token, btn)`**（批量模式，推荐）—— 调用 `/ajax/illusts/bookmarks/edit_restrict`，body `{ bookmarkIds: [...], bookmarkRestrict: 'private' }`，一次提交多个**收藏 ID**（`bookmarkData.id`）。这是官方批量编辑用的接口：请求数从 N 降到约 N/48，故又快又几乎不触发 429。
+- **`convertWorks(works, token, btn, onProgress)`** —— 统一的「转换一组 works」入口，按 `convMode` 分派：
+  - 批量：按 `BATCH_SIZE` 切块 → `setPrivateBatch`，块间 `batchInterval`（±20% 抖动）节流。
+  - 慢速：逐个 `pace.wait()` → `setPrivate` → `pace.ok()`。
+  - 每完成一块/一个调 `onProgress(n)` 累加进度。
 
-> ⚠️ 注意：将收藏转为不公开的机制是「用 restrict=1 重新提交收藏」，而非删除再添加。
+> ⚠️ 注意：转为不公开的机制——慢速是「用 restrict=1 重新提交收藏」；批量是「edit_restrict 改收藏的可见性」。批量接口用的是**收藏 ID**（`bookmarkData.id`），不是作品 ID。两者均仍带 `x-csrf-token`（带了无害）。
 
 ### 3.3 主流程 `run(btn)`
-拿到 `token` 与 `userId` 后重置 `pace`，分两种模式执行（核心差异见下节）。写入**逐个串行**：每次 `await pace.wait()` → `setPrivate` → `pace.ok()`，由调速器统一节流（不再批量并发）。扫描翻页之间同样用 `pace.wait()` 节流。完成/出错都会更新按钮文案；出错时重新启用按钮以便重试。
+拿到 `token` 与 `userId` 后重置 `pace`，按 `r18Only` 分两种**抓取骨架**（核心差异见下节），抓到的 works 统一交给 **`convertWorks`** 转换（再由 `convMode` 决定批量/慢速）。扫描翻页之间用 `pace.wait()` 节流。进度通过 `onProgress` 回调统一刷新按钮文案（批量模式按批跳）。
+
+**运行/暂停状态机**：模块作用域的 `running`（是否进行中）与 `paused`（是否暂停）替代了旧的 `btn.disabled`。`run()` 开头置 `running=true; paused=false;`，并用 `finally` 复位 `running=false`，确保成功/异常都能恢复到可重新开始的状态。三处循环（R18 扫描内层、R18 转换、全部转换）的每次迭代顶部 `await waitWhilePaused(btn)`——暂停在**迭代边界**生效；若点击时正卡在请求或 429 倒计时里，会等当前这一步走完再停。
 
 ### 3.4 UI 层
-- **浮动按钮**：右下角固定定位，文案随 `r18Only` 切换（🔒 全部 / 🔞 仅R18），同时承担**进度与状态显示**（扫描中、转换中、倒计时、完成、出错）。
+- **浮动按钮（三态：开始 / 暂停 / 继续）**：右下角固定定位。空闲时文案随 `r18Only` 切换（🔒 全部 / 🔞 仅R18），点击开始；进行中点击切换暂停（显示「▶ 已暂停，点击继续」），再点继续。全程承担**进度与状态显示**（扫描中、转换中、倒计时、已暂停、完成、出错），运行中文案附「⏸点击暂停」提示。
+- **`waitWhilePaused(btn)`** —— 暂停期间在迭代边界轮询等待（每 200ms），保证进度不丢、不跳过。
 - **`toast(msg)`**：右下角短暂提示（2s 后移除），用于配置变更反馈。
-- **`registerMenu()`**：注册三个油猴菜单项（R18 开关、写入间隔、扫描模式）。每次配置变更后**重新注册**菜单以刷新文案（先 unregister 再 register）。
+- **`registerMenu()`**：注册油猴菜单项（R18 开关、模式切换、间隔、扫描模式）。**间隔项随当前 `convMode` 条件显示**：批量模式显示「批次间隔」，慢速模式显示「写入间隔」。每次配置变更后**重新注册**菜单以刷新文案（先 unregister 再 register）。
 
 ---
 
-## 4. 两种转换模式（最易混淆，重点理解）
+## 4. 转换模式（两个正交维度，重点理解）
+
+转换由**两个独立维度**组合而成：
+
+- **抓取维度（`r18Only`）** 决定怎么遍历收藏：全部模式 vs 仅 R18 模式（见下 A/B）。
+- **写入维度（`convMode`）** 决定怎么提交转换：
+  - **批量(推荐)**：`convertWorks` 把每组 works 按 48 切块，走 `edit_restrict` 一次提交一批（收藏 ID），块间 `batchInterval` 节流。请求数 ≈ N/48，几乎不限速。
+  - **慢速(保底)**：逐个走 `add`（作品 ID）+ `pace` 自适应节流。最稳，最慢。
+
+两维度自由组合（如「仅 R18 + 批量」）。下面 A/B 只讲抓取骨架，转换都委托给 `convertWorks`。
 
 ### 模式 A：全部模式（`r18Only = false`）
 ```
-循环：始终从 offset=0 拉取第一页 → 过滤出有 bookmarkData 的作品
-     → 逐个串行转不公开（pace.wait 节流）→ 直到某次拉取为空
+循环：始终从 offset=0 拉取第一页 → 过滤出有 bookmarkData.id 的作品
+     → convertWorks 转不公开 → 直到某次拉取为空
 ```
 **原理**：转为不公开后，该作品会从「公开收藏」列表消失，所以列表会随转换自然缩短，反复取第一页即可，无需翻页。
 
@@ -94,7 +115,7 @@ https://www.pixiv.net/users/*/bookmarks/artworks*
   ├─ 内层扫描：每轮扫描 maxPages 页（scanPages 或全部）
   │    累积本轮 R18 作品（xRestrict > 0），offset += 100，页间 pace.wait 节流
   │    若某页不足 100 条 → 已到末尾（reachedEnd）
-  ├─ 转换本轮收集的 R18 作品（逐个串行，pace.wait 节流）
+  ├─ convertWorks 转换本轮收集的 R18 作品
   └─ 若已到末尾则结束；否则 offset -= 本轮转换数量（回退对齐）
 ```
 - `scanPages = 0`：先扫完整个收藏夹再统一转换。
@@ -121,7 +142,10 @@ getToken() + getUserId()  ──失败──▶ alert 提示未登录
    │             │
    └──────┬──────┘
           ▼
-  setPrivate(逐个串行) ──▶ fetchWithRetry ──429──▶ pace.bump + Retry-After/退避倒计时重试
+  convertWorks ─┬─ batch: setPrivateBatch(一批收藏ID) ─┐
+                └─ slow:  setPrivate(逐个作品ID)+pace ─┤
+                                                       ▼
+                              fetchWithRetry ──429──▶ Retry-After/退避倒计时重试
           │
           ▼
   按钮显示「✓ 完成，共 N 个」
@@ -132,8 +156,9 @@ getToken() + getUserId()  ──失败──▶ alert 提示未登录
 ## 6. 维护提示（给后续修改者）
 
 - **改动后记得提升 `@version`**，否则用户端不会自动更新。
-- Pixiv 接口与页面结构可能变化，重点关注：`getToken()` 的几条降级路径、`/ajax/...` 接口路径与字段（`works`、`total`、`bookmarkData`、`xRestrict`、`id`）。
-- 写入串行（并发=1）、`reqInterval`、`pace` 的 bump/ok 系数、429 退避参数都是与 Pixiv 限流博弈的经验值，调整时注意不要过激触发更严格封禁。
+- Pixiv 接口与页面结构可能变化，重点关注：`getToken()` 的几条降级路径、`/ajax/...` 接口路径与字段（`works`、`total`、`bookmarkData.id`、`xRestrict`、`id`）；批量接口 `edit_restrict` 的 `bookmarkIds` / `bookmarkRestrict` 字段名。
+- 区分**作品 ID**（`w.id`，慢速 `add` 用）与**收藏 ID**（`w.bookmarkData.id`，批量 `edit_restrict` 用）——用错会静默失败。
+- `BATCH_SIZE=48`、`batchInterval`、`reqInterval`、`pace` 的 bump/ok 系数、429 退避参数都是与 Pixiv 限流博弈的经验值，调整时注意不要过激触发更严格封禁。
 - 无测试、无 lint、无构建：直接编辑单文件即可，验证方式是在浏览器装脚本实跑。
 - 文案与注释以中文为主，沿用现有风格。
 ```
