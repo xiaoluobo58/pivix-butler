@@ -1,4 +1,5 @@
 # Pivix butler
 ## Pixiv收藏批量转换脚本
-你是否还在因被朋友/画师大大看见自己P站收藏夹内的R18内容而感到尴尬？
+你是否还在因被朋友&画师大大看见自己P站收藏夹内的R18内容而感到尴尬？
 导入本脚本至油猴插件内，一键将你收藏夹内的R18插画转为私密！
+[点击此处安装脚本](https://raw.githubusercontent.com/xiaoluobo58/pivix-butler/main/pixiv-bookmark-to-private.user.js)
