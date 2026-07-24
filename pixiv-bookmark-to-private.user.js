@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv 收藏转不公开
 // @namespace    https://www.pixiv.net/
-// @version      1.4.0
+// @version      1.4.1
 // @description  一键将收藏夹所有公开收藏转为不公开（支持仅转换R18内容）
 // @author       Misaka Milobo (By Claude Code)
 // @updateURL    https://raw.githubusercontent.com/xiaoluobo58/pivix-butler/main/pixiv-bookmark-to-private.user.js
@@ -149,13 +149,23 @@
             log('__NEXT_DATA__', 'error');
         }
 
-        // 5. inline scripts 扫描
+        // 5. inline scripts 扫描（增强版，支持多种 token 模式）
         try {
             for (const s of document.querySelectorAll('script:not([src])')) {
-                const m = s.textContent.match(/"token"\s*:\s*"([a-f0-9]{32,})"/);
-                if (m && validate(m[1])) {
-                    log('inline-scripts', 'success', m[1]);
-                    return m[1];
+                // 尝试多种匹配模式
+                const patterns = [
+                    /"token"\s*:\s*"([a-f0-9]{32,})"/,           // "token":"xxx"
+                    /['"]token['"]\s*:\s*['"]([a-f0-9]{32,})['"]/,  // 'token':'xxx' 或 "token":'xxx'
+                    /token["\s:=]+["']([a-f0-9]{32,})["']/,     // token="xxx" 或 token:'xxx'
+                    /"api"\s*:\s*\{[^}]*"token"\s*:\s*"([a-f0-9]{32,})"/,  // "api":{"token":"xxx"}
+                ];
+
+                for (const pattern of patterns) {
+                    const m = s.textContent.match(pattern);
+                    if (m && validate(m[1])) {
+                        log('inline-scripts', 'success', m[1]);
+                        return m[1];
+                    }
                 }
             }
             log('inline-scripts', 'not-found');
