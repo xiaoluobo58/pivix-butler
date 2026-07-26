@@ -368,32 +368,7 @@
         console.groupEnd();
 
         if (!token || !userId) {
-            const errorMsg = [];
-            if (!token) errorMsg.push('• Token 获取失败');
-            if (!userId) errorMsg.push('• 用户 ID 获取失败');
-
-            const suggestions = [
-                '',
-                '可能的原因：',
-                '1. 未登录 Pixiv 或登录已过期',
-                '2. Pixiv 页面结构发生变化',
-                '3. 浏览器扩展冲突或隐私保护设置',
-                '',
-                '排查建议：',
-                '• 刷新页面后重试',
-                '• 检查是否已登录 Pixiv',
-                '• 打开浏览器控制台查看详细日志',
-                '• 运行 window.pixivBookmarkDebug.checkToken() 诊断',
-            ];
-
-            alert([
-                '⚠️ 无法获取必要信息',
-                '',
-                ...errorMsg,
-                ...suggestions,
-            ].join('\n'));
-
-            console.error('[Pixiv Butler] 初始化失败，详细信息见上方诊断');
+            alert('无法获取登录信息，请确认已登录 Pixiv');
             return;
         }
 
