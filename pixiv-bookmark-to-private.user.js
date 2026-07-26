@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pixiv 收藏转不公开
 // @namespace    https://www.pixiv.net/
-// @version      1.4.1
+// @version      1.5.0
 // @description  一键将收藏夹所有公开收藏转为不公开（支持仅转换R18内容）
 // @author       Misaka Milobo (By Claude Code)
 // @updateURL    https://raw.githubusercontent.com/xiaoluobo58/pivix-butler/main/pixiv-bookmark-to-private.user.js
@@ -62,6 +62,36 @@
         };
 
         const validate = t => typeof t === 'string' && /^[a-f0-9]{32,}$/.test(t);
+
+        // ★ 新版 Pixiv (Next.js)：token 在 __NEXT_DATA__ 的 serverSerializedPreloadedState
+        //   （二次 JSON 编码的字符串）里，路径为 state.api.token —— 当前线上主策略
+        try {
+            const nd = JSON.parse(document.getElementById('__NEXT_DATA__')?.textContent ?? '{}');
+            const sps = nd?.props?.pageProps?.serverSerializedPreloadedState;
+            if (typeof sps === 'string' && sps.includes('token')) {
+                const state = JSON.parse(sps);
+                const direct = state?.api?.token;
+                if (validate(direct)) {
+                    log('next-preloaded-state', 'success', direct);
+                    return direct;
+                }
+                // api.token 不在时兜底遍历整个 state
+                const walk = o => {
+                    if (!o || typeof o !== 'object') return null;
+                    if (typeof o.token === 'string' && validate(o.token)) return o.token;
+                    for (const v of Object.values(o)) { const r = walk(v); if (r) return r; }
+                    return null;
+                };
+                const t = walk(state);
+                if (t) {
+                    log('next-preloaded-state', 'success', t);
+                    return t;
+                }
+            }
+            log('next-preloaded-state', 'not-found');
+        } catch (e) {
+            log('next-preloaded-state', 'error');
+        }
 
         // 0. meta 标签策略
         try {
@@ -130,11 +160,19 @@
             log('window-globals', 'error');
         }
 
-        // 4. __NEXT_DATA__ 递归遍历 (Next.js Pixiv)
+        // 4. __NEXT_DATA__ 递归遍历 (Next.js Pixiv)，能解析内嵌的 JSON 字符串
         try {
             const nd = JSON.parse(document.getElementById('__NEXT_DATA__')?.textContent ?? '{}');
             const walk = o => {
-                if (!o || typeof o !== 'object') return null;
+                if (!o) return null;
+                if (typeof o === 'string') {
+                    // 二次 JSON 编码的字符串（如 serverSerializedPreloadedState）
+                    if ((o[0] === '{' || o[0] === '[') && o.includes('token')) {
+                        try { return walk(JSON.parse(o)); } catch {}
+                    }
+                    return null;
+                }
+                if (typeof o !== 'object') return null;
                 if (typeof o.token === 'string' && validate(o.token)) return o.token;
                 for (const v of Object.values(o)) { const r = walk(v); if (r) return r; }
                 return null;
@@ -155,6 +193,7 @@
                 // 尝试多种匹配模式
                 const patterns = [
                     /"token"\s*:\s*"([a-f0-9]{32,})"/,           // "token":"xxx"
+                    /\\"token\\"\s*:\s*\\"([a-f0-9]{32,})\\"/,   // 转义形式 \"token\":\"xxx\"（JSON 字符串内嵌 JSON）
                     /['"]token['"]\s*:\s*['"]([a-f0-9]{32,})['"]/,  // 'token':'xxx' 或 "token":'xxx'
                     /token["\s:=]+["']([a-f0-9]{32,})["']/,     // token="xxx" 或 token:'xxx'
                     /"api"\s*:\s*\{[^}]*"token"\s*:\s*"([a-f0-9]{32,})"/,  // "api":{"token":"xxx"}
@@ -566,7 +605,13 @@
 
         checkGlobals() {
             console.group('🌐 全局变量检查');
+            let hasPreloadedState = false;
+            try {
+                const nd = JSON.parse(document.getElementById('__NEXT_DATA__')?.textContent ?? '{}');
+                hasPreloadedState = typeof nd?.props?.pageProps?.serverSerializedPreloadedState === 'string';
+            } catch {}
             const checks = {
+                '__NEXT_DATA__ serverSerializedPreloadedState (新版主策略)': hasPreloadedState,
                 'window.__pixiv_bootstrapper': window.__pixiv_bootstrapper,
                 'window.pixiv': window.pixiv,
                 'window.__NEXT_DATA__': !!document.getElementById('__NEXT_DATA__'),
